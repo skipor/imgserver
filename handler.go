@@ -2,10 +2,11 @@ package imgserver
 
 import (
 	"bytes"
-	"net/http"
-	"strconv"
-
 	"encoding/json"
+	"errors"
+	"net/http"
+	"net/url"
+	"strconv"
 
 	"github.com/Sirupsen/logrus"
 )
@@ -45,7 +46,29 @@ func handleRequest(h *Handler, header http.Header, r *http.Request) (statusCode 
 
 func bodyOrErr(h *Handler, header http.Header, r *http.Request) (body *bytes.Buffer, err error) {
 	//return bytes.NewBufferString("All is OK!!!"), nil //TODO
-	return nil, &handlerError{statusCode:500, description:"bbbb"} //TODO
+	return nil, &handlerError{statusCode: 500, description: "bbbb"} //TODO
+}
+
+func extractURLParam(requestURL *url.URL) (*url.URL, error) {
+	query := requestURL.Query()
+
+	const expectedParamsNum = 1
+	if len(query) != expectedParamsNum {
+		return nil, errors.New("unexpected non url params")
+	}
+
+	urlParms := query["url"]
+	const expectedURLParams = 1
+	if len(urlParms) > expectedURLParams {
+		return nil, errors.New("too many url params")
+	}
+
+	urlParam := urlParms[0]
+	if urlParam == "" {
+		return nil, errors.New("url param expected")
+	}
+
+	return url.Parse(urlParam)
 }
 
 //log, extract statusCode, marshal error
