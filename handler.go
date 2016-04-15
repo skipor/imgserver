@@ -9,6 +9,7 @@ import (
 	"strconv"
 
 	"github.com/Sirupsen/logrus"
+	"github.com/asaskevich/govalidator" //IsUrl
 )
 
 type Logger interface {
@@ -38,7 +39,7 @@ type ErrorHandler interface {
 }
 
 type Handler struct {
-	Log Logger
+	Log          Logger
 	LogicHandler LogicHandler
 	ErrorHandler ErrorHandler
 }
@@ -56,7 +57,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	for key, valueList := range resp.Header {
 		w.Header().Del(key)
-		for _ ,value := range valueList {
+		for _, value := range valueList {
 			w.Header().Add(key, value)
 		}
 	}
@@ -89,7 +90,7 @@ func (h *ErrorLogger) HandleError(r *http.Request, err error) *Response {
 		if hErr.statusCode >= 400 && hErr.statusCode < 500 {
 			h.Log.WithField("StatusCode", hErr.statusCode).Info("Body handle client error: ", hErr)
 		} else {
-			h.Log.WithField("StatusCode", hErr.statusCode).Error("Body handle error: ", hErr)
+			h.Log.WithField("StatusCode", hErr.statusCode).Warn("Body handle error: ", hErr)
 		}
 
 		resp := NewResponse()
@@ -129,10 +130,14 @@ func extractURLParam(requestURL *url.URL) (*url.URL, error) {
 	if len(urlParms) > expectedURLParams {
 		return nil, errors.New("too many url params")
 	}
+	if len(urlParms) < expectedURLParams {
+		return nil, errors.New("too few url params")
+	}
 
 	urlParam := urlParms[0]
-	if urlParam == "" {
-		return nil, errors.New("url param expected")
+
+	if !govalidator.IsURL(urlParam) {
+		return nil, NewHandlerError(400, "invalid URL as 'url' query parameter")
 	}
 
 	return url.Parse(urlParam)
