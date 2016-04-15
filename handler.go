@@ -11,12 +11,36 @@ import (
 	"github.com/Sirupsen/logrus"
 )
 
-const (
-	InternalErrorJSON = `{ "error":"Internal Error" }`
-)
+type Logger interface {
+	logrus.FieldLogger
+}
+
+type Response struct {
+	StatusCode int
+	Header     http.Header
+	Body       *bytes.Buffer
+}
+
+func NewResponse() *Response {
+	return &Response{
+		-1,
+		make(http.Header),
+		&bytes.Buffer{},
+	}
+}
+
+type LogicHandler interface {
+	HandleLogic(r *http.Request) (*Response, error)
+}
+
+type ErrorHandler interface {
+	HandleError(r *http.Request, err error) *Response
+}
 
 type Handler struct {
-	Log logrus.FieldLogger
+	Log Logger
+	LogicHandler LogicHandler
+	ErrorHandler ErrorHandler
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -24,29 +48,72 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	statusCode, body := handleRequest(h, w.Header(), r)
-	w.Header().Set("Content-Length", strconv.Itoa(body.Len()))
-	w.WriteHeader(statusCode)
+
+	resp, err := h.LogicHandler.HandleLogic(r)
+	if err != nil {
+		resp = h.ErrorHandler.HandleError(r, err)
+	}
+
+	for key, valueList := range resp.Header {
+		w.Header().Del(key)
+		for _ ,value := range valueList {
+			w.Header().Add(key, value)
+		}
+	}
+
+	w.Header().Set("Content-Length", strconv.Itoa(resp.Body.Len()))
+	w.WriteHeader(resp.StatusCode)
 	if r.Method == http.MethodGet {
-		if _, err := body.WriteTo(w); err != nil {
+		if _, err := resp.Body.WriteTo(w); err != nil {
 			h.Log.Error("Body write error: ", err)
 		}
 	}
 }
 
-func handleRequest(h *Handler, header http.Header, r *http.Request) (statusCode int, body *bytes.Buffer) {
-	var bodyErr error
-	if body, bodyErr = bodyOrErr(h, header, r); bodyErr != nil {
-		header.Set("Content-Type", "application/json")
-		return handleError(h, bodyErr)
-	}
-	return http.StatusOK, body
-
+type ErrorLogger struct {
+	Log Logger
 }
 
-func bodyOrErr(h *Handler, header http.Header, r *http.Request) (body *bytes.Buffer, err error) {
-	//return bytes.NewBufferString("All is OK!!!"), nil //TODO
-	return nil, &handlerError{statusCode: 500, description: "bbbb"} //TODO
+func NewInternalErrorResponse() *Response {
+	return &Response{
+		http.StatusInternalServerError,
+		http.Header(map[string][]string{
+			"Content-Type": []string{"application/json"},
+		}),
+		bytes.NewBufferString(`{ "error":"Internal Error" }`),
+	}
+}
+
+func (h *ErrorLogger) HandleError(r *http.Request, err error) *Response {
+	if hErr, ok := err.(*HandlerError); ok {
+		if hErr.statusCode >= 400 && hErr.statusCode < 500 {
+			h.Log.WithField("StatusCode", hErr.statusCode).Info("Body handle client error: ", hErr)
+		} else {
+			h.Log.WithField("StatusCode", hErr.statusCode).Error("Body handle error: ", hErr)
+		}
+
+		resp := NewResponse()
+		resp.StatusCode = hErr.statusCode
+		resp.Header.Set("Content-Type", "application/json")
+		marshalError := map[string]string{"error": hErr.description}
+		if err = json.NewEncoder(resp.Body).Encode(marshalError); err != nil {
+			h.Log.Error("handlerErr marshal error: ", err)
+			return NewInternalErrorResponse()
+		}
+		return resp
+	}
+
+	resp := NewInternalErrorResponse()
+	h.Log.WithField("StatusCode", resp.StatusCode).Error("Body handle error: ", err)
+	return resp
+}
+
+type ImgLogicHandler struct {
+	Log Logger
+}
+
+func (h *ImgLogicHandler) HandleLogic(r *http.Request) (*Response, error) {
+	return nil, &HandlerError{statusCode: 500, description: "bbbb"} //TODO
 }
 
 func extractURLParam(requestURL *url.URL) (*url.URL, error) {
@@ -69,28 +136,4 @@ func extractURLParam(requestURL *url.URL) (*url.URL, error) {
 	}
 
 	return url.Parse(urlParam)
-}
-
-//log, extract statusCode, marshal error
-func handleError(h *Handler, err error) (statusCode int, body *bytes.Buffer) {
-	if handlerErr, ok := err.(*handlerError); ok {
-		statusCode = handlerErr.statusCode
-		if handlerErr.statusCode >= 400 && handlerErr.statusCode < 500 {
-			h.Log.WithField("StatusCode", statusCode).Info("Body handle client error: ", handlerErr)
-		} else {
-			h.Log.WithField("StatusCode", statusCode).Error("Body handle error: ", handlerErr)
-		}
-
-		var marshaledData []byte
-		marshalError := map[string]string{"error": handlerErr.description}
-		if marshaledData, err = json.Marshal(marshalError); err != nil {
-			h.Log.Error("handlerErr marshal error: ", err)
-			return http.StatusInternalServerError, bytes.NewBufferString(InternalErrorJSON)
-		}
-		return statusCode, bytes.NewBuffer(marshaledData)
-	}
-	statusCode = http.StatusInternalServerError
-	body = bytes.NewBufferString(InternalErrorJSON)
-	h.Log.WithField("StatusCode", statusCode).Error("Body handle error: ", err)
-	return
 }

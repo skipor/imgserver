@@ -6,7 +6,7 @@ import (
 	"net/http"
 
 	logger "github.com/Sirupsen/logrus"
-	"github.com/Skipor/imgserver"
+	. "github.com/Skipor/imgserver"
 )
 
 const (
@@ -30,12 +30,18 @@ func (h rootHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	l := logger.StandardLogger()
+
 	//set logrus as standart log output
-	w := logger.StandardLogger().Writer()
+	w := l.Writer()
 	defer w.Close()
 	log.SetOutput(w)
 
-	imgHandler := &imgserver.Handler{logger.StandardLogger()}
+	imgHandler := &Handler{
+		Log: logger.StandardLogger(),
+		LogicHandler: &ImgLogicHandler{l},
+		ErrorHandler: &ErrorLogger{l},
+	}
 	http.Handle("/", rootHandler{imgHandler})
 	logger.Fatal(
 		http.ListenAndServe(
