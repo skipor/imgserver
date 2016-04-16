@@ -38,7 +38,7 @@ func main() {
 	log.SetOutput(w)
 
 	imgHandler := &Handler{
-		Log: logger.StandardLogger(),
+		Log:          logger.StandardLogger(),
 		LogicHandler: &ImgLogicHandler{l},
 		ErrorHandler: &ErrorLogger{l},
 	}
