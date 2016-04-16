@@ -97,5 +97,86 @@ var _ = Describe("Parameter Parse", func() {
 			Expect(res).To(BeNil())
 		})
 	})
+	Context("when relative URL as parameter", func() {
+		BeforeEach(func() {
+			inputRawURL = "http://localhost:8888/?url=%2Fqwertyqwerty"
+		})
+		It("then error", func() {
+			Expect(err).To(HaveOccurred())
+		})
+		It("then return nil", func() {
+			Expect(res).To(BeNil())
+		})
+	})
+	Context("when  URL has fragment parameter", func() {
+		BeforeEach(func() {
+			inputRawURL = url.QueryEscape(`?url=https://golang.org/doc/#abc`)
+		})
+		It("then error", func() {
+			Expect(err).To(HaveOccurred())
+		})
+		It("then return nil", func() {
+			Expect(res).To(BeNil())
+		})
+	})
+})
+
+var _ = Describe("Parse Content-Type", func() {
+	var (
+		contentType string
+		typeSubtype string
+		charset string
+	)
+
+	JustBeforeEach(func() {
+		typeSubtype, charset = parseContentType(contentType)
+	})
+
+	Context("when content-type have no charset", func() {
+		BeforeEach(func() {
+			contentType = `  application/x-www-form-urlencoded  `
+		})
+		It("then type/subteype same as passed", func() {
+			Expect(typeSubtype).To(Equal("application/x-www-form-urlencoded"))
+		})
+		It("then charset is empty", func() {
+			Expect(charset).To(BeZero())
+		})
+	})
+
+	Context("when content-type have charset", func() {
+		BeforeEach(func() {
+			contentType = `  text/html ; charset=utf-8 `
+		})
+		It("then type/subteype same as passed", func() {
+			Expect(typeSubtype).To(Equal("text/html"))
+		})
+		It("then charset same as passed", func() {
+			Expect(charset).To(Equal("utf-8"))
+		})
+	})
+
+	Context("when content-type have  invalid charset", func() {
+		BeforeEach(func() {
+			contentType = ` text/html; charset =utf-8 `
+		})
+		It("then type/subteype is empty", func() {
+			Expect(typeSubtype).To(BeZero())
+		})
+		It("then charset same is empty", func() {
+			Expect(charset).To(BeZero())
+		})
+	})
+	Context("when content-type have  invalid type/subtype", func() {
+		BeforeEach(func() {
+			contentType = ` text/ html ; charset=utf-8 `
+		})
+		It("then type/subteype is empty", func() {
+			Expect(typeSubtype).To(BeZero())
+		})
+		It("then charset same is empty", func() {
+			Expect(charset).To(BeZero())
+		})
+	})
 
 })
