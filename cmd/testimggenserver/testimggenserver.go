@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"image/draw"
 	"image/gif"
 	"image/jpeg"
 	"image/png"
@@ -15,10 +16,7 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
-	"image/draw"
 )
-
-var validPathRegex = regexp.MustCompile(`^\/(?:[a-zA-Z0-9_]+\/)*([1-9][0-9]{0,3})x([1-9][0-9]{0,3})\.(gif|png|jpg|jpeg)$`)
 
 func encodeImg(img image.Image, format string) (*bytes.Buffer, error) {
 	buff := &bytes.Buffer{}
@@ -74,6 +72,8 @@ func getSalt(path string) []byte {
 	}
 	return hash.Sum(nil)
 }
+
+var validPathRegex = regexp.MustCompile(`^\/(?:[a-zA-Z0-9_]+\/)*([1-9][0-9]{0,3})x([1-9][0-9]{0,3})\.(gif|png|jpg|jpeg)$`)
 
 func imgHandle(w http.ResponseWriter, r *http.Request) {
 	if !(r.Method == http.MethodGet) {

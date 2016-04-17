@@ -9,14 +9,18 @@ import (
 	"net/url"
 	"regexp"
 	"strconv"
-	"strings"
 	"unicode/utf8"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/asaskevich/govalidator" //IsUrl
 	"golang.org/x/net/context"
+	"golang.org/x/net/context/ctxhttp"
 
-	"github.com/Skipor/imgserver/toutf8"
+	"encoding/base64"
+
+	"strings"
+
+	"golang.org/x/net/html/charset"
 )
 
 type Logger interface {
@@ -121,6 +125,7 @@ type ImgLogicHandler struct {
 	Log       Logger
 	Transport *http.Transport // use one transport for reusing TCP connections
 	Client    *http.Client    // default client for this handler requests
+	//TODO make dependency injection for helper functions
 }
 
 func NewImgLogicHandler(log Logger) *ImgLogicHandler {
@@ -128,36 +133,30 @@ func NewImgLogicHandler(log Logger) *ImgLogicHandler {
 	return &ImgLogicHandler{
 		log,
 		tr,
-		&http.Client{Transport:tr},
+		&http.Client{Transport: tr},
 	}
 }
 
+//TODO make context handler and impl http.Handler via context adaptor
 func (h *ImgLogicHandler) HandleLogic(req *http.Request) (*Response, error) {
 	h.Log.Debug("In HandleLogic")
 	// ctx is the Context for this handler. Calling cancel closes the
 	// ctx.Done channel, which is the cancellation signal for requests
 	// started by this handler.
 	// abstract way to handle cancel and timeouts
+
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel() // Cancel ctx as soon as handleSearch returns.
+	//ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(time.Millisecond * 10)) //TODO just for test
+	defer cancel() // Cancel ctx as soon as HandleLogic returns
 
 	urlParam, err := extractURLParam(req.URL)
 	if err != nil {
 		return nil, err
 	}
 	h.Log.Infof("Conten-Type: %s", req.Header.Get("Content-Type"))
-
-	// request will be canceled on context cancel or timeout
-	//another way to do context-aware request. Way to set req.Cancel = ctx.Done seems be better
-	//resp, err := ctxhttp.Get(ctx, h.client, urlParam.String())
-	htmlReq, err := http.NewRequest("GET", urlParam.String(), nil)
-	htmlReq.Cancel = ctx.Done()
+	resp, err := contextAwareGet(ctx, h, urlParam.String())
 	if err != nil {
-		return nil, &HandlerError{400, "Can't get requested page", err}
-	}
-	resp, err := h.Client.Do(htmlReq)
-	if err != nil {
-		return nil, &HandlerError{400, "Can't get requested page", err}
+		return nil, &HandlerError{500, "Can't get requested page", err}
 	}
 	httpBody, err := getUTF8HTTPBody(ctx, h, resp)
 	if err != nil {
@@ -171,60 +170,145 @@ func (h *ImgLogicHandler) HandleLogic(req *http.Request) (*Response, error) {
 	}
 }
 
-type image struct {
-	url        *url.URL
+type imgTag struct {
+	url    string
+	altTag string
+}
+
+type fetchedImgTag struct {
+	imgTag
 	format     string
 	base64Data *bytes.Buffer
 }
 
 //run goroutine that parse http and goroutine for image download
-//func extractImages(ctx *context.Context, body *bytes.Buffer) (<-chan *image, <-chan error)
+func extractImages(ctx context.Context, h *ImgLogicHandler, body *bytes.Buffer) ([]fetchedImgTag, error) {
+	ctx, cancel := context.WithCancel(ctx)
 
-//func parseHTTP
+	parseResChan, parseErrChan := imageParse(ctx, h, body)
+
+	// by contract all fetch subrotines should write either to res either to err channel
+	fetchResChan := make(chan fetchedImgTag)
+	fetchErrChan := make(chan error)
+	await := 0 //number of fetch routines to await
+	result := make([]fetchedImgTag, 0)
+	//await subroutines on panic or
+	defer func() {
+		cancel() // cancel subroutines fetch requests
+		//await canceled subroutines
+		for ; await > 0; await-- {
+			select {
+			case <-fetchResChan:
+			case <-fetchErrChan:
+			}
+		}
+		//for debug close fetch channels
+		//leaked fetch subroutine will cause panic on closed channel
+		close(fetchResChan)
+		close(fetchErrChan)
+
+	}()
+	for parseResChan != nil && await > 0 {
+		select {
+		case parsedImgPtr := <-parseResChan:
+			//disable parse channels on parse finish
+			if parsedImgPtr == nil {
+				parseResChan = nil
+				parseErrChan = nil
+				continue
+			}
+			//create new fetch routine on img
+			await++
+			fetchImage(ctx, h, *parsedImgPtr, fetchResChan, fetchErrChan)
+		case err := <-parseErrChan:
+			return nil, err
+		case fetchedImg := <-fetchResChan:
+			await--
+			result = append(result, fetchedImg)
+		case err := <-fetchErrChan:
+			await--
+			return nil, err
+		}
+
+	}
+	return result, nil
+
+}
+
+func imageParse(ctx context.Context, h *ImgLogicHandler, htmlData *bytes.Buffer) (<-chan *imgTag, <-chan error) {
+	resChan := make(chan *imgTag)
+	errChan := make(chan error)
+	go func() {
+
+	}()
+	return resChan, errChan
+}
+
+// try to download parsedImage
+func fetchImage(ctx context.Context, h *ImgLogicHandler, img imgTag, imgc chan<- fetchedImgTag, errc chan<- error) {
+	go func() {
+		resp, err := contextAwareGet(ctx, h, img.url)
+		if err != nil {
+			errc <- &HandlerError{500, "can't fetch image: " + img.url, err}
+			return
+		}
+		defer resp.Body.Close()
+		ct := resp.Header.Get("Content-Type")
+		if ct == "" {
+			errc <- NewHandlerError(400, "no content-type on image: "+img.url)
+			return
+		}
+		b64buf := &bytes.Buffer{}
+		w := base64.NewEncoder(base64.StdEncoding, b64buf)
+		defer w.Close()
+		_, err = io.Copy(w, resp.Body)
+		if err != nil {
+			errc <- &HandlerError{400, "image fetching error: " + img.url, err}
+			return
+		}
+		imgc <- fetchedImgTag{img, ct, b64buf}
+
+	}()
+}
+
+func contextAwareGet(ctx context.Context, h *ImgLogicHandler, reqUrl string) (*http.Response, error) {
+	// request will be canceled on context cancel or timeout
+	return ctxhttp.Get(ctx, h.Client, reqUrl)
+
+	// another way to do context-aware request.
+	// Way to set req.Cancel = ctx.Done seems have better performance, but return not ctx.Err() on ctx.Done
+	//req, err := http.NewRequest("GET", reqUrl, nil)
+	//req.Cancel = ctx.Done()
+	//if err != nil {
+	//	return nil, &HandlerError{500, "Can't get requested page", err}
+	//}
+	//return h.Client.Do(req)
+}
 
 func getUTF8HTTPBody(ctx context.Context, h *ImgLogicHandler, resp *http.Response) (*bytes.Buffer, error) {
-	log := h.Log
 	var err error
 	defer resp.Body.Close()
-
 	ct := resp.Header.Get("Content-Type")
-	typeSubtype, charset := parseContentType(ct)
-	log.Debugf("typeSubtype: %s", typeSubtype)
-	log.Debugf("charset: %s", charset)
-	if typeSubtype != "text/html" {
-		return nil, NewHandlerError(400, "illegal content-type on requested page: "+ct)
+	var ctWithoutParameter string
+	if prefix := strings.Split(ct, ";"); len(prefix) != 0 {
+		ctWithoutParameter = prefix[0]
+	} else {
+		ctWithoutParameter = ct
 	}
-	bodyBuf := &bytes.Buffer{}
-	_, err = io.Copy(bodyBuf, resp.Body)
+	ctWithoutParameter = strings.TrimSpace(ctWithoutParameter)
+	if ctWithoutParameter != "text/html" {
+		return nil, NewHandlerError(400, "requested page have unsupported content type")
+	}
+	r, err := charset.NewReader(resp.Body, ct)
+	buf := &bytes.Buffer{}
+	_, err = io.Copy(buf, r)
 	if err != nil {
-		return nil, &HandlerError{500, "Can't get body of requested page", err}
+		return nil, &HandlerError{400, "Requested page have unsupported charset or invalid charset sequence", err}
 	}
-	const utf8Charset = "utf-8"
-	//return body if it utf-8 encoded already
-	if charset == utf8Charset || charset == strings.ToUpper(utf8Charset) || charset == "" && utf8.Valid(bodyBuf.Bytes()) {
-		return bodyBuf, nil
-	}
-	if charset == "" {
-		charset = "ISO-8859-1" //default HTTP charset
-	}
-	decodedBodyBuf := &bytes.Buffer{}
-	_, err = toutf8.Decode(decodedBodyBuf, bodyBuf, charset)
-	if err == toutf8.UnsuportedCharset {
-		_, err = toutf8.Decode(decodedBodyBuf, bodyBuf, strings.ToLower(charset)) //another try can works sometime
-	}
-	//TODO try parse <meta> html tag for encoding
-	switch err {
-	case nil:
-		return decodedBodyBuf, nil
-	case toutf8.UnsuportedCharset:
-		return nil, &HandlerError{400, "Requested page have unsupported charset: " + charset, err}
-	case toutf8.IllegalInputSequence:
-		return nil, &HandlerError{400, "Requested page body has invalid charset sequence", err}
-	}
-	if !utf8.Valid(decodedBodyBuf.Bytes()) { // TODO remove before release
+	if !utf8.Valid(buf.Bytes()) { // TODO remove before release
 		return nil, NewHandlerError(500, "body of requested page decoded into invalid utf-8")
 	}
-	return decodedBodyBuf, nil
+	return buf, nil
 }
 
 // try to decode data into utf-8 using iconv
