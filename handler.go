@@ -7,20 +7,15 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strconv"
+	"strings"
 	"unicode/utf8"
+
+	"golang.org/x/net/context"
+	"golang.org/x/net/html/charset"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/asaskevich/govalidator" //IsUrl
-	"golang.org/x/net/context"
-	"golang.org/x/net/context/ctxhttp"
-
-	"encoding/base64"
-
-	"strings"
-
-	"golang.org/x/net/html/charset"
 )
 
 type Logger interface {
@@ -153,12 +148,12 @@ func (h *ImgLogicHandler) HandleLogic(req *http.Request) (*Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	h.Log.Infof("Conten-Type: %s", req.Header.Get("Content-Type"))
-	resp, err := contextAwareGet(ctx, h, urlParam.String())
+	h.Log.Debugf("Content-Type: %s", req.Header.Get("Content-Type"))
+	resp, err := cxtAwareGet(ctx, h.Client, urlParam.String())
 	if err != nil {
 		return nil, &HandlerError{500, "Can't get requested page", err}
 	}
-	httpBody, err := getUTF8HTTPBody(ctx, h, resp)
+	httpBody, err := getUTF8HTTPBody(ctx, resp)
 	if err != nil {
 		return nil, err
 	}
@@ -170,122 +165,7 @@ func (h *ImgLogicHandler) HandleLogic(req *http.Request) (*Response, error) {
 	}
 }
 
-type imgTag struct {
-	url    string
-	altTag string
-}
-
-type fetchedImgTag struct {
-	imgTag
-	format     string
-	base64Data *bytes.Buffer
-}
-
-//run goroutine that parse http and goroutine for image download
-func extractImages(ctx context.Context, h *ImgLogicHandler, body *bytes.Buffer) ([]fetchedImgTag, error) {
-	ctx, cancel := context.WithCancel(ctx)
-
-	parseResChan, parseErrChan := imageParse(ctx, h, body)
-
-	// by contract all fetch subrotines should write either to res either to err channel
-	fetchResChan := make(chan fetchedImgTag)
-	fetchErrChan := make(chan error)
-	await := 0 //number of fetch routines to await
-	result := make([]fetchedImgTag, 0)
-	//await subroutines on panic or
-	defer func() {
-		cancel() // cancel subroutines fetch requests
-		//await canceled subroutines
-		for ; await > 0; await-- {
-			select {
-			case <-fetchResChan:
-			case <-fetchErrChan:
-			}
-		}
-		//for debug close fetch channels
-		//leaked fetch subroutine will cause panic on closed channel
-		close(fetchResChan)
-		close(fetchErrChan)
-
-	}()
-	for parseResChan != nil && await > 0 {
-		select {
-		case parsedImgPtr := <-parseResChan:
-			//disable parse channels on parse finish
-			if parsedImgPtr == nil {
-				parseResChan = nil
-				parseErrChan = nil
-				continue
-			}
-			//create new fetch routine on img
-			await++
-			fetchImage(ctx, h, *parsedImgPtr, fetchResChan, fetchErrChan)
-		case err := <-parseErrChan:
-			return nil, err
-		case fetchedImg := <-fetchResChan:
-			await--
-			result = append(result, fetchedImg)
-		case err := <-fetchErrChan:
-			await--
-			return nil, err
-		}
-
-	}
-	return result, nil
-
-}
-
-func imageParse(ctx context.Context, h *ImgLogicHandler, htmlData *bytes.Buffer) (<-chan *imgTag, <-chan error) {
-	resChan := make(chan *imgTag)
-	errChan := make(chan error)
-	go func() {
-
-	}()
-	return resChan, errChan
-}
-
-// try to download parsedImage
-func fetchImage(ctx context.Context, h *ImgLogicHandler, img imgTag, imgc chan<- fetchedImgTag, errc chan<- error) {
-	go func() {
-		resp, err := contextAwareGet(ctx, h, img.url)
-		if err != nil {
-			errc <- &HandlerError{500, "can't fetch image: " + img.url, err}
-			return
-		}
-		defer resp.Body.Close()
-		ct := resp.Header.Get("Content-Type")
-		if ct == "" {
-			errc <- NewHandlerError(400, "no content-type on image: "+img.url)
-			return
-		}
-		b64buf := &bytes.Buffer{}
-		w := base64.NewEncoder(base64.StdEncoding, b64buf)
-		defer w.Close()
-		_, err = io.Copy(w, resp.Body)
-		if err != nil {
-			errc <- &HandlerError{400, "image fetching error: " + img.url, err}
-			return
-		}
-		imgc <- fetchedImgTag{img, ct, b64buf}
-
-	}()
-}
-
-func contextAwareGet(ctx context.Context, h *ImgLogicHandler, reqUrl string) (*http.Response, error) {
-	// request will be canceled on context cancel or timeout
-	return ctxhttp.Get(ctx, h.Client, reqUrl)
-
-	// another way to do context-aware request.
-	// Way to set req.Cancel = ctx.Done seems have better performance, but return not ctx.Err() on ctx.Done
-	//req, err := http.NewRequest("GET", reqUrl, nil)
-	//req.Cancel = ctx.Done()
-	//if err != nil {
-	//	return nil, &HandlerError{500, "Can't get requested page", err}
-	//}
-	//return h.Client.Do(req)
-}
-
-func getUTF8HTTPBody(ctx context.Context, h *ImgLogicHandler, resp *http.Response) (*bytes.Buffer, error) {
+func getUTF8HTTPBody(ctx context.Context, resp *http.Response) (*bytes.Buffer, error) {
 	var err error
 	defer resp.Body.Close()
 	ct := resp.Header.Get("Content-Type")
@@ -309,22 +189,6 @@ func getUTF8HTTPBody(ctx context.Context, h *ImgLogicHandler, resp *http.Respons
 		return nil, NewHandlerError(500, "body of requested page decoded into invalid utf-8")
 	}
 	return buf, nil
-}
-
-// try to decode data into utf-8 using iconv
-// return number of bytes writen to
-// see iconv documentation for error meaning
-var contentTypeRegex = regexp.MustCompile(`^\s*([^;\s]+(?:\/[^\/;\s]+))\s*(?:;\s*(?:charset=(?:([^"\s]+)|"([^"\s]+)"))){0,1}\s*$`)
-
-func parseContentType(ct string) (typeSubtype string, parameterValue string) {
-	m := contentTypeRegex.FindStringSubmatch(ct)
-	if m == nil {
-		return "", ""
-	}
-	if len(m) > 2 {
-		return m[1], m[2]
-	}
-	return m[1], ""
 }
 
 func extractURLParam(requestURL *url.URL) (*url.URL, error) {
