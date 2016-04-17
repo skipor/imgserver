@@ -3,7 +3,6 @@ package imgserver
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -37,28 +36,47 @@ func NewResponse() *Response {
 }
 
 type LogicHandler interface {
-	HandleLogic(req *http.Request) (*Response, error)
+	HandleLogic(ctx context.Context, req *http.Request) (*Response, error)
 }
 
 type ErrorHandler interface {
-	HandleError(req *http.Request, err error) *Response
+	HandleError(ctx context.Context, req *http.Request, err error) *Response
 }
 
-type Handler struct {
+type ImgHandler struct {
 	Log          Logger
 	LogicHandler LogicHandler
 	ErrorHandler ErrorHandler
 }
 
-func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+//TODO make context handler and impl http.Handler via context adaptor
+type Handler interface {
+	ServeHTTPC(context.Context, http.ResponseWriter, *http.Request)
+}
+
+type ContextAdaptor struct {
+	Handler
+	Ctx context.Context
+}
+
+
+
+
+func (h ContextAdaptor) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	h.ServeHTTPC(h.Ctx, w, req)
+	return
+}
+
+
+func (h *ImgHandler) ServeHTTPC(ctx context.Context, w http.ResponseWriter, req *http.Request) {
 	if !(req.Method == http.MethodGet || req.Method == http.MethodHead) {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	resp, err := h.LogicHandler.HandleLogic(req)
+	resp, err := h.LogicHandler.HandleLogic(ctx, req)
 	if err != nil {
-		resp = h.ErrorHandler.HandleError(req, err)
+		resp = h.ErrorHandler.HandleError(ctx, req, err)
 	}
 
 	for key, valueList := range resp.Header {
@@ -91,7 +109,7 @@ func NewInternalErrorResponse() *Response {
 	}
 }
 
-func (h *ErrorLogger) HandleError(req *http.Request, err error) *Response {
+func (h *ErrorLogger) HandleError(ctx context.Context, req *http.Request, err error) *Response {
 	//TODO handle http.context errors
 	if hErr, ok := err.(*HandlerError); ok {
 		if hErr.statusCode >= 400 && hErr.statusCode < 500 {
@@ -117,43 +135,40 @@ func (h *ErrorLogger) HandleError(req *http.Request, err error) *Response {
 }
 
 type ImgLogicHandler struct {
-	Log       Logger
-	Transport *http.Transport // use one transport for reusing TCP connections
-	Client    *http.Client    // default client for this handler requests
+	log    Logger
+	client *http.Client // default client for this handler requests
 	//TODO make dependency injection for helper functions
+	bodyGetter bodyGetter
 }
 
-func NewImgLogicHandler(log Logger) *ImgLogicHandler {
-	tr := &http.Transport{}
+func NewImgLogicHandler(log Logger, client *http.Client) *ImgLogicHandler {
 	return &ImgLogicHandler{
 		log,
-		tr,
-		&http.Client{Transport: tr},
+		client,
+		bodyGetterFunc(getBody),
 	}
 }
 
-//TODO make context handler and impl http.Handler via context adaptor
-func (h *ImgLogicHandler) HandleLogic(req *http.Request) (*Response, error) {
-	h.Log.Debug("In HandleLogic")
+func (h *ImgLogicHandler) HandleLogic(ctx context.Context, req *http.Request) (*Response, error) {
+	h.log.Debug("In HandleLogic")
 	// ctx is the Context for this handler. Calling cancel closes the
 	// ctx.Done channel, which is the cancellation signal for requests
 	// started by this handler.
 	// abstract way to handle cancel and timeouts
 
-	ctx, cancel := context.WithCancel(context.Background())
-	//ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(time.Millisecond * 10)) //TODO just for test
-	defer cancel() // Cancel ctx as soon as HandleLogic returns
-
 	urlParam, err := extractURLParam(req.URL)
 	if err != nil {
 		return nil, err
 	}
-	h.Log.Debugf("Content-Type: %s", req.Header.Get("Content-Type"))
-	resp, err := cxtAwareGet(ctx, h.Client, urlParam.String())
+	ctx = newContext(context.Background(), h.log, h.client, urlParam)
+	//ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(time.Millisecond * 10)) //TODO just for test
+
+	h.log.Debugf("Content-Type: %s", req.Header.Get("Content-Type"))
+	resp, err := cxtAwareGet(ctx, urlParam.String())
 	if err != nil {
 		return nil, &HandlerError{500, "Can't get requested page", err}
 	}
-	httpBody, err := getUTF8HTTPBody(ctx, resp)
+	httpBody, err := h.bodyGetter.getBody(ctx, resp)
 	if err != nil {
 		return nil, err
 	}
@@ -165,7 +180,17 @@ func (h *ImgLogicHandler) HandleLogic(req *http.Request) (*Response, error) {
 	}
 }
 
-func getUTF8HTTPBody(ctx context.Context, resp *http.Response) (*bytes.Buffer, error) {
+type bodyGetter interface {
+	getBody(ctx context.Context, resp *http.Response) (*bytes.Buffer, error)
+}
+type bodyGetterFunc func(ctx context.Context, resp *http.Response) (*bytes.Buffer, error)
+
+func (f bodyGetterFunc) getBody(ctx context.Context, resp *http.Response) (*bytes.Buffer, error) {
+	return f(ctx, resp)
+}
+
+//returns http utf-8 encoded page body either error
+func getBody(ctx context.Context, resp *http.Response) (*bytes.Buffer, error) {
 	var err error
 	defer resp.Body.Close()
 	ct := resp.Header.Get("Content-Type")
@@ -196,16 +221,16 @@ func extractURLParam(requestURL *url.URL) (*url.URL, error) {
 
 	const expectedParamsNum = 1
 	if len(query) != expectedParamsNum {
-		return nil, errors.New("unexpected non url params")
+		return nil, NewHandlerError(400, "unexpected param num")
 	}
 
 	urlParms := query["url"]
 	const expectedURLParams = 1
 	if len(urlParms) > expectedURLParams {
-		return nil, errors.New("too many url params")
+		return nil, NewHandlerError(400, "too many url params")
 	}
 	if len(urlParms) < expectedURLParams {
-		return nil, errors.New("too few url params")
+		return nil, NewHandlerError(400, "too few url params")
 	}
 
 	urlParam := urlParms[0]

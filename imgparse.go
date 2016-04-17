@@ -3,7 +3,10 @@ package imgserver
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"io"
+	"net/url"
+	"strings"
 
 	"golang.org/x/net/context"
 	"golang.org/x/net/html"
@@ -14,14 +17,24 @@ type imgTag struct {
 	attr map[string]string
 }
 
+func (img imgTag) isDataURL() bool {
+	return strings.HasPrefix(img.attr["src"], "data:")
+}
+
 type fetchedImgTag struct {
 	imgTag
+	//bellow fields can be zero if isDataURL() == true
 	format     string
 	base64Data *bytes.Buffer
 }
 
 //run goroutine that parse http and goroutine for image download
-func extractImages(ctx context.Context, h *ImgLogicHandler, r io.Reader) ([]fetchedImgTag, error) {
+
+type imgExtractor interface {
+	extractImages(ctx context.Context, r io.Reader) ([]fetchedImgTag, error)
+}
+
+func extractImages(ctx context.Context, r io.Reader) ([]fetchedImgTag, error) {
 	ctx, cancel := context.WithCancel(ctx)
 
 	parseResChan, parseErrChan := imageParse(ctx, r)
@@ -47,6 +60,12 @@ func extractImages(ctx context.Context, h *ImgLogicHandler, r io.Reader) ([]fetc
 		close(fetchErrChan)
 
 	}()
+	//prepare URL
+	pageURL := getURLParam(ctx)
+	pageURL.Fragment = ""
+	pageURL.RawQuery = ""
+	pageURLStr := pageURL.String()
+
 	for parseResChan != nil && await > 0 {
 		select {
 		case parsedImgPtr := <-parseResChan:
@@ -58,8 +77,16 @@ func extractImages(ctx context.Context, h *ImgLogicHandler, r io.Reader) ([]fetc
 			}
 			//create new fetch routine on img
 			await++
-			//TODO URL composition
-			fetchImage(ctx, h, *parsedImgPtr, fetchResChan, fetchErrChan)
+
+			img := *parsedImgPtr
+			if img.isDataURL() {
+				fetchResChan <- fetchedImgTag{*parsedImgPtr, "", nil}
+			}
+			imgURLStr, err := imgURL(img, pageURLStr)
+			if err != nil {
+				return nil, err
+			}
+			fetchImage(ctx, img, imgURLStr, fetchResChan, fetchErrChan)
 		case err := <-parseErrChan:
 			return nil, err
 		case fetchedImg := <-fetchResChan:
@@ -72,6 +99,26 @@ func extractImages(ctx context.Context, h *ImgLogicHandler, r io.Reader) ([]fetc
 
 	}
 	return result, nil
+}
+
+//TODO test
+func imgURL(img imgTag, pageURL string) (string, error) {
+	if img.isDataURL() {
+		panic(errors.New("imgURL on 'data: URL' image"))
+	}
+	src := img.attr["src"]
+
+	imgSrcURL, err := url.Parse(src)
+	if err != nil {
+		return "", err
+	}
+	if imgSrcURL.IsAbs() {
+		return src, nil
+	}
+	if src[0] == '/' {
+		return pageURL + src, nil
+	}
+	return pageURL + "/" + src, nil
 
 }
 
@@ -130,30 +177,21 @@ func parseImgToken(token html.Token) (*imgTag, error) {
 
 }
 
-// type Token struct {
-//     Type     TokenType
-//     DataAtom atom.Atom
-//     Data     string
-//     Attr     []Attribute
-// }
-//
-// type Attribute struct {
-//     Namespace, Key, Val string
-// }
-
 // try to download parsedImage
-func fetchImage(ctx context.Context, h *ImgLogicHandler, img imgTag, imgc chan<- fetchedImgTag, errc chan<- error) {
+func fetchImage(ctx context.Context, img imgTag, imgURL string, imgc chan<- fetchedImgTag, errc chan<- error) {
+	if img.isDataURL() {
+		panic(errors.New("imgURL on 'data: URL' image"))
+	}
 	go func() {
-		src := img.attr["src"]
-		resp, err := cxtAwareGet(ctx, h.Client, src)
+		resp, err := cxtAwareGet(ctx, imgURL)
 		if err != nil {
-			errc <- &HandlerError{500, "can't fetch image: " + src, err}
+			errc <- &HandlerError{500, "can't fetch image: " + imgURL, err}
 			return
 		}
 		defer resp.Body.Close()
 		ct := resp.Header.Get("Content-Type")
 		if ct == "" {
-			errc <- NewHandlerError(400, "no content-type on image: "+src)
+			errc <- NewHandlerError(400, "no content-type on image: "+imgURL)
 			return
 		}
 		b64buf := &bytes.Buffer{}
@@ -161,7 +199,7 @@ func fetchImage(ctx context.Context, h *ImgLogicHandler, img imgTag, imgc chan<-
 		defer w.Close()
 		_, err = io.Copy(w, resp.Body)
 		if err != nil {
-			errc <- &HandlerError{400, "image fetching error: " + src, err}
+			errc <- &HandlerError{400, "image fetching error: " + imgURL, err}
 			return
 		}
 		imgc <- fetchedImgTag{img, ct, b64buf}

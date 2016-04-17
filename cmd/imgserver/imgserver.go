@@ -2,11 +2,12 @@ package main
 
 import (
 	"fmt"
-	"log"
+	stdlog "log"
 	"net/http"
 
-	logger "github.com/Sirupsen/logrus"
+	log "github.com/Sirupsen/logrus"
 	. "github.com/Skipor/imgserver"
+	"golang.org/x/net/context"
 )
 
 const (
@@ -14,7 +15,7 @@ const (
 )
 
 func init() {
-	logger.SetFormatter(&logger.TextFormatter{})
+	log.SetFormatter(&log.TextFormatter{})
 }
 
 type rootHandler struct {
@@ -29,18 +30,22 @@ func (h rootHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.h.ServeHTTP(w, r)
 }
 
+//TODO pass port by flag
 func main() {
-	l := logger.StandardLogger()
+	logger := log.StandardLogger()
 
 	//set logrus as standart log output
-	w := l.Writer()
+	w := logger.Writer()
 	defer w.Close()
-	log.SetOutput(w)
+	stdlog.SetOutput(w)
 
-	imgHandler := &Handler{
-		Log:          logger.StandardLogger(),
-		LogicHandler: NewImgLogicHandler(l),
-		ErrorHandler: &ErrorLogger{l},
+	imgHandler := ContextAdaptor{
+		Handler: &ImgHandler{
+			Log:          logger,
+			LogicHandler: NewImgLogicHandler(logger, http.DefaultClient),
+			ErrorHandler: &ErrorLogger{logger},
+		},
+		Ctx: context.Background(),
 	}
 	http.Handle("/", rootHandler{imgHandler})
 	logger.Fatal(
