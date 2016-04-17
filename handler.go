@@ -9,14 +9,14 @@ import (
 	"net/url"
 	"regexp"
 	"strconv"
-
 	"strings"
 	"unicode/utf8"
 
 	"github.com/Sirupsen/logrus"
-	"github.com/Skipor/imgserver/toutf8"
 	"github.com/asaskevich/govalidator" //IsUrl
 	"golang.org/x/net/context"
+
+	"github.com/Skipor/imgserver/toutf8"
 )
 
 type Logger interface {
@@ -93,6 +93,7 @@ func NewInternalErrorResponse() *Response {
 }
 
 func (h *ErrorLogger) HandleError(req *http.Request, err error) *Response {
+	//TODO handle http.context errors
 	if hErr, ok := err.(*HandlerError); ok {
 		if hErr.statusCode >= 400 && hErr.statusCode < 500 {
 			h.Log.WithField("StatusCode", hErr.statusCode).Info("Body handle client error: ", hErr)
@@ -117,14 +118,26 @@ func (h *ErrorLogger) HandleError(req *http.Request, err error) *Response {
 }
 
 type ImgLogicHandler struct {
-	Log Logger
+	Log       Logger
+	Transport *http.Transport // use one transport for reusing TCP connections
+	Client    *http.Client    // default client for this handler requests
+}
+
+func NewImgLogicHandler(log Logger) *ImgLogicHandler {
+	tr := &http.Transport{}
+	return &ImgLogicHandler{
+		log,
+		tr,
+		&http.Client{Transport:tr},
+	}
 }
 
 func (h *ImgLogicHandler) HandleLogic(req *http.Request) (*Response, error) {
+	h.Log.Debug("In HandleLogic")
 	// ctx is the Context for this handler. Calling cancel closes the
 	// ctx.Done channel, which is the cancellation signal for requests
 	// started by this handler.
-	h.Log.Debug("In HandleLogic")
+	// abstract way to handle cancel and timeouts
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel() // Cancel ctx as soon as handleSearch returns.
 
@@ -132,37 +145,52 @@ func (h *ImgLogicHandler) HandleLogic(req *http.Request) (*Response, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	h.Log.Infof("Conten-Type: %s", req.Header.Get("Content-Type"))
-	htmlReq, err := http.NewRequest("GET", urlParam.String(), nil)
-	if err != nil {
-		return nil, &HandlerError{500, "Can't get requested page", err}
-	}
-	var httpBody *bytes.Buffer
 
-	err = httpDo(ctx, htmlReq, func(resp *http.Response, err error) error {
-		if err != nil {
-			return err
-		}
-		httpBody, err = getUTF8HTTPBody(h.Log, resp)
-		return err
-	})
+	// request will be canceled on context cancel or timeout
+	//another way to do context-aware request. Way to set req.Cancel = ctx.Done seems be better
+	//resp, err := ctxhttp.Get(ctx, h.client, urlParam.String())
+	htmlReq, err := http.NewRequest("GET", urlParam.String(), nil)
+	htmlReq.Cancel = ctx.Done()
+	if err != nil {
+		return nil, &HandlerError{400, "Can't get requested page", err}
+	}
+	resp, err := h.Client.Do(htmlReq)
+	if err != nil {
+		return nil, &HandlerError{400, "Can't get requested page", err}
+	}
+	httpBody, err := getUTF8HTTPBody(ctx, h, resp)
 	if err != nil {
 		return nil, err
 	}
-	header := make(http.Header) //TODO remove
-	header.Set("Content-Type", "text/html;charset=utf-8")
 
-	return &Response{200, header, httpBody}, nil
+	{ //TODO change with real logic
+		header := make(http.Header)
+		header.Set("Content-Type", "text/html;charset=utf-8")
+		return &Response{200, header, httpBody}, nil
+	}
 }
-func getUTF8HTTPBody(log Logger, resp *http.Response) (*bytes.Buffer, error) {
+
+type image struct {
+	url        *url.URL
+	format     string
+	base64Data *bytes.Buffer
+}
+
+//run goroutine that parse http and goroutine for image download
+//func extractImages(ctx *context.Context, body *bytes.Buffer) (<-chan *image, <-chan error)
+
+//func parseHTTP
+
+func getUTF8HTTPBody(ctx context.Context, h *ImgLogicHandler, resp *http.Response) (*bytes.Buffer, error) {
+	log := h.Log
 	var err error
 	defer resp.Body.Close()
 
 	ct := resp.Header.Get("Content-Type")
 	typeSubtype, charset := parseContentType(ct)
-	log.Infof("typeSubtype: %s", typeSubtype) //todo make debug
-	log.Infof("charset: %s", charset) //todo make debug
+	log.Debugf("typeSubtype: %s", typeSubtype)
+	log.Debugf("charset: %s", charset)
 	if typeSubtype != "text/html" {
 		return nil, NewHandlerError(400, "illegal content-type on requested page: "+ct)
 	}
@@ -213,24 +241,6 @@ func parseContentType(ct string) (typeSubtype string, parameterValue string) {
 		return m[1], m[2]
 	}
 	return m[1], ""
-}
-
-func httpDo(ctx context.Context, req *http.Request, f func(*http.Response, error) error) error {
-	// Run the HTTP request in a goroutine and pass the response to f.
-	tr := &http.Transport{}
-	client := &http.Client{Transport: tr}
-	c := make(chan error, 1)
-	go func() {
-		c <- f(client.Do(req))
-	}()
-	select {
-	case <-ctx.Done():
-		tr.CancelRequest(req)
-		<-c // Wait for f to return.
-		return ctx.Err()
-	case err := <-c:
-		return err
-	}
 }
 
 func extractURLParam(requestURL *url.URL) (*url.URL, error) {

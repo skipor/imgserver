@@ -39,7 +39,7 @@ func main() {
 
 	imgHandler := &Handler{
 		Log:          logger.StandardLogger(),
-		LogicHandler: &ImgLogicHandler{l},
+		LogicHandler: NewImgLogicHandler(l),
 		ErrorHandler: &ErrorLogger{l},
 	}
 	http.Handle("/", rootHandler{imgHandler})
