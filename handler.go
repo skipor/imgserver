@@ -59,14 +59,10 @@ type ContextAdaptor struct {
 	Ctx context.Context
 }
 
-
-
-
 func (h ContextAdaptor) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	h.ServeHTTPC(h.Ctx, w, req)
 	return
 }
-
 
 func (h *ImgHandler) ServeHTTPC(ctx context.Context, w http.ResponseWriter, req *http.Request) {
 	if !(req.Method == http.MethodGet || req.Method == http.MethodHead) {
@@ -138,7 +134,8 @@ type ImgLogicHandler struct {
 	log    Logger
 	client *http.Client // default client for this handler requests
 	//TODO make dependency injection for helper functions
-	bodyGetter bodyGetter
+	bodyGetter   bodyGetter
+	imgExtractor imgExtractor
 }
 
 func NewImgLogicHandler(log Logger, client *http.Client) *ImgLogicHandler {
@@ -146,6 +143,7 @@ func NewImgLogicHandler(log Logger, client *http.Client) *ImgLogicHandler {
 		log,
 		client,
 		bodyGetterFunc(getBody),
+		imgExtractorFunc(extractImages),
 	}
 }
 
@@ -173,11 +171,27 @@ func (h *ImgLogicHandler) HandleLogic(ctx context.Context, req *http.Request) (*
 		return nil, err
 	}
 
-	{ //TODO change with real logic
-		header := make(http.Header)
-		header.Set("Content-Type", "text/html;charset=utf-8")
-		return &Response{200, header, httpBody}, nil
+	images, err := h.imgExtractor.extractImages(ctx, httpBody)
+	respBody, err := formImagesHTML(ctx, images)
+	header := make(http.Header)
+	header.Set("Content-Type", "text/html;charset=utf-8")
+	return &Response{200, header, respBody}, nil
+
+}
+
+func formImagesHTML(ctx context.Context, images []imgTag) (*bytes.Buffer, error) {
+	buf := bytes.NewBufferString(
+		`<html>
+<head>
+<title>imgserv</title>
+</head>
+<body> `)
+	for _, img := range images {
+		buf.WriteString(img.token().String())
 	}
+	buf.WriteString(`</body>
+	</html>`)
+	return buf, nil
 }
 
 type bodyGetter interface {

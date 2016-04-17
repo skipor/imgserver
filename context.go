@@ -49,7 +49,7 @@ func getClient(ctx context.Context) *http.Client {
 }
 
 func getURLParam(ctx context.Context) *url.URL {
-	urlParam, ok := ctx.Value(CtxHTTPClientKey).(*url.URL)
+	urlParam, ok := ctx.Value(ctxURLParamKey).(*url.URL)
 	if !ok {
 		panic(errors.New("No urlParam in context"))
 	}
