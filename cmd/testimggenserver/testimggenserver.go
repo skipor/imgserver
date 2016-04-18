@@ -77,7 +77,10 @@ func getSalt(path string) []byte {
 
 var validPathRegex = regexp.MustCompile(`^\/(?:[a-zA-Z0-9_]+\/)*([1-9][0-9]{0,3})x([1-9][0-9]{0,3})\.(gif|png|jpg|jpeg)$`)
 
-func imgHandle(w http.ResponseWriter, r *http.Request) {
+//generate images on URLs  "some/path/(height)x(width).(png|gif|gpg)" images/200x500.jpg
+//images have size and format as requested image name
+//on every url sends unique image (hash of url encoded into image)
+func ImgHandle(w http.ResponseWriter, r *http.Request) {
 	if !(r.Method == http.MethodGet) {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
@@ -127,7 +130,7 @@ func imgHandle(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	const PORT = 8080
-	http.HandleFunc("/", imgHandle)
+	http.HandleFunc("/", ImgHandle)
 	log.Fatal(
 		http.ListenAndServe(
 			fmt.Sprint(":", PORT),

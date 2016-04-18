@@ -21,6 +21,7 @@ type Handler interface {
 	ServeHTTPC(context.Context, http.ResponseWriter, *http.Request)
 }
 
+// Implement http.Handler interface for imgserver.Handler
 type ContextAdaptor struct {
 	Handler
 	Ctx context.Context
