@@ -95,7 +95,7 @@ func (imp imgExtractorImp) extractImages(ctx context.Context, r io.Reader) ([]im
 		close(fetchErrChan)
 
 	}()
-	folderURL := getFolderURL(*getURLParam(ctx))
+	folderURL := *getFolderURL(*getURLParam(ctx))
 
 	//while parsing in process and fetch tasks not finished
 	for parseResChan != nil || await > 0 {
@@ -118,7 +118,9 @@ func (imp imgExtractorImp) extractImages(ctx context.Context, r io.Reader) ([]im
 			if err != nil {
 				return nil, err
 			}
-			log.Debug("img parsed. Send for fetching")
+			log.WithField("token", img.token().String()).
+				Debug("img parsed. Send for fetching")
+
 			await++
 			imp.fetcher.fetchImage(ctx, img, imgURL, fetchResChan, fetchErrChan)
 		case err := <-parseErrChan:
@@ -229,11 +231,13 @@ func (imp imageParserImp) parseImage(ctx context.Context, r io.Reader) (<-chan i
 			}
 			token := z.Token()
 			switch tokenType {
-			case html.SelfClosingTagToken: fallthrough
+			case html.SelfClosingTagToken:
+				fallthrough
 			case html.StartTagToken: // <tag>
-				if token.DataAtom != atom.Img {
+				if token.DataAtom != atom.Img || token.Data != "img" {
 					continue
 				}
+
 				img, err := imp.tokenParse.parseImgToken(token)
 				if err != nil {
 					errc <- err
@@ -262,7 +266,7 @@ func parseImgToken(token html.Token) (imgTag, error) {
 		key := attr.Key
 		if supportedImgAttributes[key] {
 			if key == "src" {
-				img.srcIndex = i
+				img.srcIndex = len(img.attr)
 			}
 			img.attr = append(img.attr, token.Attr[i])
 		}
@@ -273,34 +277,40 @@ func parseImgToken(token html.Token) (imgTag, error) {
 	return img, nil
 }
 
-func getFolderURL(pageURL url.URL) string {
-	folderURL := &pageURL //alias
-	folderURL.Fragment = ""
-	folderURL.RawQuery = ""
-	folderURL.Path = strings.Trim(folderURL.Path, "/")
-	if !strings.ContainsRune(folderURL.Path, '/') {
-		folderURL.Path = ""
+func getFolderURL(pageURL url.URL) *url.URL {
+	pageURL.Fragment = ""
+	pageURL.RawQuery = ""
+	pageURL.Path = strings.Trim(pageURL.Path, "/")
+	if !strings.ContainsRune(pageURL.Path, '/') {
+		pageURL.Path = ""
 	} else {
-		split := strings.Split(folderURL.Path, "/")
-		folderURL.Path = strings.Join(split[:len(split)-1], "/")
+		split := strings.Split(pageURL.Path, "/")
+		pageURL.Path = strings.Join(split[:len(split)-1], "/")
 	}
-	return folderURL.String()
+	return &pageURL
 }
 
-func getImgURL(src string, folderURL string) (string, error) {
+func getImgURL(src string, folderURL url.URL) (string, error) {
 	imgSrcURL, err := url.Parse(src)
 	if err != nil {
 		return "", &HandlerError{400, "invalid img tag src URL", err}
 	}
-	if imgSrcURL.IsAbs() {
-		return src, nil
-	}
 	var res string
-	folderURL = strings.TrimRight(folderURL, "/")
-	if src[0] == '/' || folderURL[len(folderURL)-1] == '/' {
-		res = folderURL + src
+	if imgSrcURL.IsAbs() {
+		res = src
+	} else if strings.HasPrefix(src, "//") { //yep, is absolute too
+		res = "http:" + src
+	} else if src[0] == '/' {
+		folderURL.Path = src
+		folderURL.RawPath = src
+		res = folderURL.String()
 	} else {
-		res = folderURL + "/" + src
+		folderStr := strings.TrimRight(folderURL.String(), "/") //caulse relative
+		if folderStr[len(folderStr)-1] == '/' {
+			res = folderStr + src
+		} else {
+			res = folderStr + "/" + src
+		}
 	}
 	if !govalidator.IsURL(res) {
 		return "", &HandlerError{400, "invalid img tag src URL", err}

@@ -8,10 +8,11 @@ import (
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
 
+	"sync/atomic"
+
 	log "github.com/Sirupsen/logrus"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
-	"sync/atomic"
 )
 
 var _ = func() {
@@ -27,7 +28,7 @@ var _ = Describe("get folder URL by page URL", func() {
 		var err error
 		pageURL, err = url.Parse(pageRawURL)
 		Expect(err).NotTo(HaveOccurred())
-		res = getFolderURL(*pageURL)
+		res = getFolderURL(*pageURL).String()
 	})
 	Context("when pageURL end with '/'", func() {
 		const correctRes = `https://golang.org/doc`
@@ -59,21 +60,26 @@ var _ = Describe("get folder URL by page URL", func() {
 
 //func getImgURL(src string, folderURL string) (string, error)
 var _ = Describe("getImgURL by src atribute and folder URL", func() {
-	var (
-		src       string
-		folderURL string
+	var ( //test input
+		src          string
+		folderRawURL string
+	)
+	var ( //test output
+		folderURL *url.URL
 		res       string
 		err       error
 	)
 	JustBeforeEach(func() {
-		res, err = getImgURL(src, folderURL)
+		folderURL, err = url.Parse(folderRawURL)
+		Expect(err).NotTo(HaveOccurred())
+		res, err = getImgURL(src, *folderURL)
 	})
 
 	Context("when image in same folder", func() {
 		const correctRes = "https://golang.org/doc/articles/html5.gif"
 		BeforeEach(func() {
 			src = "html5.gif"
-			folderURL = "https://golang.org/doc/articles"
+			folderRawURL = "https://golang.org/doc/articles"
 		})
 		It("then not error", func() {
 			Expect(err).NotTo(HaveOccurred())
@@ -84,10 +90,10 @@ var _ = Describe("getImgURL by src atribute and folder URL", func() {
 	})
 
 	Context("when image in another folder", func() {
-		const correctRes = "https://golang.org/doc/images/html5.gif"
+		const correctRes = "https://golang.org/images/html5.gif"
 		BeforeEach(func() {
 			src = "/images/html5.gif"
-			folderURL = "https://golang.org/doc"
+			folderRawURL = "https://golang.org/doc"
 		})
 		It("then not error", func() {
 			Expect(err).NotTo(HaveOccurred())
@@ -101,7 +107,21 @@ var _ = Describe("getImgURL by src atribute and folder URL", func() {
 		const correctRes = "https://golang.org/doc/images/html5.gif"
 		BeforeEach(func() {
 			src = "https://golang.org/doc/images/html5.gif"
-			folderURL = "https://golang.org/doc"
+			folderRawURL = "https://golang.org/doc"
+		})
+		It("then not error", func() {
+			Expect(err).NotTo(HaveOccurred())
+		})
+		It("then return value is correct", func() {
+			Expect(res).To(Equal(correctRes))
+		})
+	})
+
+	Context("when image is absolute '//URL'", func() {
+		const correctRes = `http://habrastorage.org/getpro/habr/avatars/f7b/155/cea/f7b155cea7f7369ff8c0bf797b2e8b9d.jpg`
+		BeforeEach(func() {
+			src = `//habrastorage.org/getpro/habr/avatars/f7b/155/cea/f7b155cea7f7369ff8c0bf797b2e8b9d.jpg`
+			folderRawURL = "https://golang.org/doc"
 		})
 		It("then not error", func() {
 			Expect(err).NotTo(HaveOccurred())
@@ -115,7 +135,7 @@ var _ = Describe("getImgURL by src atribute and folder URL", func() {
 	Context("when image src absolutely incorrect", func() {
 		BeforeEach(func() {
 			src = `@@@@@@!@#$%^&*()_@@/*\n!@#$\n\n7asdlfkj/.asdf1#`
-			folderURL = "https://golang.org/doc/articles"
+			folderRawURL = "https://golang.org/doc/articles"
 		})
 		It("then error", func() {
 			Expect(err).To(HaveOccurred())
@@ -127,10 +147,10 @@ var _ = Describe("getImgURL by src atribute and folder URL", func() {
 
 	//error check
 	Context("when image in another folder and '/' on src begin and folder end", func() {
-		const correctRes = "https://golang.org/doc/images/html5.gif"
+		const correctRes = "https://golang.org/images/html5.gif"
 		BeforeEach(func() {
 			src = "/images/html5.gif"
-			folderURL = "https://golang.org/doc/"
+			folderRawURL = "https://golang.org/doc/"
 		})
 		It("then not error", func() {
 			Expect(err).NotTo(HaveOccurred())
@@ -144,7 +164,7 @@ var _ = Describe("getImgURL by src atribute and folder URL", func() {
 		const correctRes = "https://golang.org/doc/images/html5.gif"
 		BeforeEach(func() {
 			src = "images/html5.gif"
-			folderURL = "https://golang.org/doc"
+			folderRawURL = "https://golang.org/doc"
 		})
 		It("then not error", func() {
 			Expect(err).NotTo(HaveOccurred())
@@ -238,12 +258,12 @@ var _ = Describe("working with ImgToken", func() {
 })
 
 var _ = Describe("parse html by parseImage", func() {
-	var ( //test input value
+	var ( //test input
 		input       string
 		tokenParser imgTokenParser
 		ctx         context.Context
 	)
-	var ( //test result value
+	var ( //test output
 		tokenParseCall int32 //use atomicaly
 		imgc           <-chan imgTag
 		errc           <-chan error
@@ -256,8 +276,8 @@ var _ = Describe("parse html by parseImage", func() {
 		Context("when ctx no imgTag errors", func() {
 			var imgMockSend imgTag
 			BeforeEach(func() {
-				imgMockSend = imgTag{srcIndex:500} //sample imgTag
-				input = "stubstubstubstub" //should be reseted by Context
+				imgMockSend = imgTag{srcIndex: 500} //sample imgTag
+				input = "stubstubstubstub"          //should be reseted by Context
 				ctx = context.Background()
 				tokenParseCall = 0
 				tokenParser = imgTokenParserFunc(
@@ -330,7 +350,6 @@ var _ = Describe("parse html by parseImage", func() {
 				It("then received value equal generated by imgTokenParser", func() {
 					Eventually(imgc).Should(Receive(Equal(imgMockSend)))
 				})
-				//<a href="/atom.xml"><img src="/img/atom.png" /></a>
 			})
 
 			Context("when nested only img tag", func() {
@@ -357,9 +376,7 @@ var _ = Describe("parse html by parseImage", func() {
 				})
 			})
 
-
 		})
-
 
 	})
 
