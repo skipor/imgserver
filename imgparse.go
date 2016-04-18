@@ -48,23 +48,6 @@ func (img imgTag) token() html.Token {
 	}
 }
 
-//TODO test
-func parseImgToken(token html.Token) (imgTag, error) {
-	img := imgTag{-1, make([]html.Attribute, 0, len(token.Attr))}
-	for i, attr := range token.Attr {
-		key := attr.Key
-		if supportedImgAttributes[key] {
-			if key == "src" {
-				img.srcIndex = i
-			}
-			img.attr = append(img.attr, token.Attr[i])
-		}
-	}
-	if img.srcIndex < 0 {
-		return imgTag{}, NewHandlerError(400, "no src attribute for <img/> tag")
-	}
-	return img, nil
-}
 
 //run goroutine that parse http and goroutine for image download
 
@@ -77,11 +60,16 @@ func (f imgExtractorFunc) extractImages(ctx context.Context, r io.Reader) ([]img
 	return f(ctx, r)
 }
 
-func extractImages(ctx context.Context, r io.Reader) ([]imgTag, error) {
+type imgExtractorImp struct {
+	parser imageParser
+	fetcher imageFetcher
+}
+
+func (imp imgExtractorImp) extractImages(ctx context.Context, r io.Reader) ([]imgTag, error) {
 	log := getLocalLogger(ctx, "extractImages")
 	log.Debug("Extracting images")
 	ctx, cancel := context.WithCancel(ctx)
-	parseResChan, parseErrChan := imageParse(ctx, r)
+	parseResChan, parseErrChan := imp.parser.parseImage(ctx, r)
 
 	// by contract all fetch subrotines should write either to res either to err channel
 	fetchResChan := make(chan imgTag)
@@ -95,9 +83,9 @@ func extractImages(ctx context.Context, r io.Reader) ([]imgTag, error) {
 		log.WithField("fetchToAwait", await).Debug("awaiting")
 		for ; await > 0; await-- {
 			select {
-			case _ = <-fetchResChan:
+			case <-fetchResChan:
 				log.Debug("img awaited")
-			case _ = <-fetchErrChan:
+			case <-fetchErrChan:
 				log.Debug("error awaited")
 			}
 		}
@@ -107,9 +95,9 @@ func extractImages(ctx context.Context, r io.Reader) ([]imgTag, error) {
 		close(fetchErrChan)
 
 	}()
-	//prepare URL
 	folderURL := getFolderURL(getURLParam(ctx))
 
+	//while parsing in process and fetch tasks not finished
 	for parseResChan != nil || await > 0 {
 		select {
 		case img, ok := <-parseResChan:
@@ -132,7 +120,7 @@ func extractImages(ctx context.Context, r io.Reader) ([]imgTag, error) {
 			}
 			log.Debug("img parsed. Send for fetching")
 			await++
-			fetchImage(ctx, img, imgURL, fetchResChan, fetchErrChan)
+			imp.fetcher.fetchImage(ctx, img, imgURL, fetchResChan, fetchErrChan)
 		case err := <-parseErrChan:
 			log.Debug("parse finished with error")
 			return nil, err
@@ -150,9 +138,18 @@ func extractImages(ctx context.Context, r io.Reader) ([]imgTag, error) {
 	return result, nil
 }
 
-// try to download parsedImage
-// on success send only img to imgc
-// on fail send only error to errc
+type imageFetcher interface {
+	// try to download parsedImage
+	// on success send only img to imgc
+	// on fail send only error to errc
+	fetchImage(ctx context.Context, img imgTag, imgURL string, imgc chan<- imgTag, errc chan<- error)
+}
+type imageFetcherFunc func(ctx context.Context, img imgTag, imgURL string, imgc chan<- imgTag, errc chan<- error)
+
+func (f imageFetcherFunc) fetchImage(ctx context.Context, img imgTag, imgURL string, imgc chan<- imgTag, errc chan<- error) {
+	f(ctx, img, imgURL, imgc, errc)
+}
+
 func fetchImage(ctx context.Context, img imgTag, imgURL string, imgc chan<- imgTag, errc chan<- error) {
 	go func() {
 		resp, err := cxtAwareGet(ctx, imgURL)
@@ -195,11 +192,24 @@ func fetchImage(ctx context.Context, img imgTag, imgURL string, imgc chan<- imgT
 	}()
 }
 
-//img chan will be closed on parse finish
-//on parse error, parser send err to errc before finish
-//err chan is unbuffered
-func imageParse(ctx context.Context, r io.Reader) (<-chan imgTag, <-chan error) {
-	//TODO test
+type imageParser interface {
+	//parse html content in separate goroutine and send imgTags to output img chan
+	//img chan will be closed on parse finish
+	//on parse error, parser send err to error chan before finish
+	//err chan is unbuffered
+	parseImage(ctx context.Context, r io.Reader) (<-chan imgTag, <-chan error)
+}
+type imageParserFunc func(ctx context.Context, r io.Reader) (<-chan imgTag, <-chan error)
+
+func (f imageParserFunc) parseImage(ctx context.Context, r io.Reader) (<-chan imgTag, <-chan error) {
+	return f(ctx, r)
+}
+
+type imageParserImp struct {
+	tokenParse imgTokenParser
+}
+
+func (imp imageParserImp) parseImage(ctx context.Context, r io.Reader) (<-chan imgTag, <-chan error) {
 	imgc := make(chan imgTag)
 	errc := make(chan error)
 	go func() {
@@ -222,7 +232,7 @@ func imageParse(ctx context.Context, r io.Reader) (<-chan imgTag, <-chan error) 
 				if token.DataAtom != atom.Img {
 					continue
 				}
-				img, err := parseImgToken(token)
+				img, err := imp.tokenParse.parseImgToken(token)
 				if err != nil {
 					errc <- err
 					return
@@ -233,6 +243,33 @@ func imageParse(ctx context.Context, r io.Reader) (<-chan imgTag, <-chan error) 
 		}
 	}()
 	return imgc, errc
+}
+
+//TODO test
+type imgTokenParser interface {
+	parseImgToken(token html.Token) (imgTag, error)
+}
+type imgTokenParserFunc func(token html.Token) (imgTag, error)
+
+func (f imgTokenParserFunc) parseImgToken(token html.Token) (imgTag, error) {
+	return f(token)
+}
+
+func parseImgToken(token html.Token) (imgTag, error) {
+	img := imgTag{-1, make([]html.Attribute, 0, len(token.Attr))}
+	for i, attr := range token.Attr {
+		key := attr.Key
+		if supportedImgAttributes[key] {
+			if key == "src" {
+				img.srcIndex = i
+			}
+			img.attr = append(img.attr, token.Attr[i])
+		}
+	}
+	if img.srcIndex < 0 {
+		return imgTag{}, NewHandlerError(400, "no src attribute for <img/> tag")
+	}
+	return img, nil
 }
 
 //TODO test

@@ -260,7 +260,10 @@ func NewImgLogicHandler(client *http.Client) *ImgLogicHandler {
 	return &ImgLogicHandler{
 		client,
 		bodyGetterFunc(getBody),
-		imgExtractorFunc(extractImages),
+		imgExtractorImp{
+			imageParserImp{imgTokenParserFunc(parseImgToken)},
+			imageFetcherFunc(fetchImage),
+		},
 	}
 }
 
