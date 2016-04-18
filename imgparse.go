@@ -229,6 +229,7 @@ func (imp imageParserImp) parseImage(ctx context.Context, r io.Reader) (<-chan i
 			}
 			token := z.Token()
 			switch tokenType {
+			case html.SelfClosingTagToken: fallthrough
 			case html.StartTagToken: // <tag>
 				if token.DataAtom != atom.Img {
 					continue

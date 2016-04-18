@@ -18,6 +18,8 @@ import (
 	"strconv"
 )
 
+//TODO move handler to separate package
+
 func encodeImg(img image.Image, format string) (*bytes.Buffer, error) {
 	buff := &bytes.Buffer{}
 	var err error
