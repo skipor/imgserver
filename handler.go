@@ -256,10 +256,21 @@ func NewResponse() *Response {
 	}
 }
 
-func NewImgLogicHandler(log Logger, client *http.Client) *ImgLogicHandler {
+func NewImgLogicHandler(client *http.Client) *ImgLogicHandler {
 	return &ImgLogicHandler{
 		client,
 		bodyGetterFunc(getBody),
 		imgExtractorFunc(extractImages),
+	}
+}
+
+func NewImgCtxAdaptor(log Logger, client *http.Client) ContextAdaptor {
+	return  ContextAdaptor{
+		Handler: &ImgHandler{
+			Log:          log,
+			LogicHandler: NewImgLogicHandler(client),
+			ErrorHandler: ErrorLogger{},
+		},
+		Ctx: context.Background(),
 	}
 }
