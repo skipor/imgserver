@@ -11,22 +11,35 @@ import (
 
 type ctxValueKeyType int
 
+//private keys
 const (
-	//private keys
 	ctxURLParamKey ctxValueKeyType = iota
 )
+
+// public keys upper handler can
 const (
-	// public keys upper handler can
 	CtxHTTPClientKey = "httpclient"
-	CtxLoggerKey = "logger"
+	CtxLoggerKey     = "logger"
 )
 
-func newContext(ctx context.Context, log Logger, client *http.Client, urlParam *url.URL) context.Context {
+func cxtAwareGet(ctx context.Context, URL string) (*http.Response, error) {
+	// request will be canceled on context cancel or timeout
+	return ctxhttp.Get(ctx, getClient(ctx), URL)
+
+	// another way to do context-aware request.
+	// Way to set req.Cancel = ctx.Done seems have better performance, but return not ctx.Err() on ctx.Done
+	//req, err := http.NewRequest("GET", reqUrl, nil)
+	//req.Cancel = ctx.Done()
+	//if err != nil {
+	//	return nil, &HandlerError{500, "Can't get requested page", err}
+	//}
+	//return h.Client.Do(req)
+}
+
+func newImgLogicContext(ctx context.Context, client *http.Client, urlParam *url.URL) context.Context {
 	//don't override passed context
-	if _, ok := ctx.Value(CtxLoggerKey).(Logger); !ok {
-		ctx = context.WithValue(ctx, CtxLoggerKey, log)
-	}
-	if _, ok := ctx.Value(CtxHTTPClientKey).(*http.Client); !ok  {
+	ctx = context.WithValue(ctx, CtxLoggerKey, SetEmitter(getLogger(ctx), "ImgLogicHandler"))
+	if _, ok := ctx.Value(CtxHTTPClientKey).(*http.Client); !ok {
 		ctx = context.WithValue(ctx, CtxHTTPClientKey, client)
 	}
 	ctx = context.WithValue(ctx, ctxURLParamKey, urlParam)
@@ -40,6 +53,11 @@ func getLogger(ctx context.Context) Logger {
 	}
 	return log
 }
+
+func setLogger(ctx context.Context, log Logger) context.Context {
+	return context.WithValue(ctx, CtxLoggerKey, log)
+}
+
 func getClient(ctx context.Context) *http.Client {
 	client, ok := ctx.Value(CtxHTTPClientKey).(*http.Client)
 	if !ok {
@@ -56,16 +74,6 @@ func getURLParam(ctx context.Context) *url.URL {
 	return urlParam
 }
 
-func cxtAwareGet(ctx context.Context, URL string) (*http.Response, error) {
-	// request will be canceled on context cancel or timeout
-	return ctxhttp.Get(ctx, getClient(ctx), URL)
-
-	// another way to do context-aware request.
-	// Way to set req.Cancel = ctx.Done seems have better performance, but return not ctx.Err() on ctx.Done
-	//req, err := http.NewRequest("GET", reqUrl, nil)
-	//req.Cancel = ctx.Done()
-	//if err != nil {
-	//	return nil, &HandlerError{500, "Can't get requested page", err}
-	//}
-	//return h.Client.Do(req)
+func getLocalLogger(ctx context.Context, emitter string) Logger {
+	return SetEmitter(getLogger(ctx), emitter)
 }

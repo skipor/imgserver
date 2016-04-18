@@ -81,6 +81,8 @@ func imgHandle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path := r.URL.Path
+	// TODO make caching for images
+	// it is too low performance for benchmark tests now
 	log.Print("Path: ", path)
 
 	matches := validPathRegex.FindStringSubmatch(path)

@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"strings"
 
@@ -39,13 +41,14 @@ var supportedImgAttributes = map[string]bool{
 
 func (img imgTag) token() html.Token {
 	return html.Token{
-		html.StartTagToken,
-		atom.Img,
-		"",
-		img.attr,
+		Type:     html.StartTagToken,
+		DataAtom: atom.Img,
+		Data:     "img",
+		Attr:     img.attr,
 	}
 }
 
+//TODO test
 func parseImgToken(token html.Token) (imgTag, error) {
 	img := imgTag{-1, make([]html.Attribute, 0, len(token.Attr))}
 	for i, attr := range token.Attr {
@@ -75,23 +78,27 @@ func (f imgExtractorFunc) extractImages(ctx context.Context, r io.Reader) ([]img
 }
 
 func extractImages(ctx context.Context, r io.Reader) ([]imgTag, error) {
+	log := getLocalLogger(ctx, "extractImages")
+	log.Debug("Extracting images")
 	ctx, cancel := context.WithCancel(ctx)
-
 	parseResChan, parseErrChan := imageParse(ctx, r)
 
 	// by contract all fetch subrotines should write either to res either to err channel
 	fetchResChan := make(chan imgTag)
 	fetchErrChan := make(chan error)
 	await := 0 //number of fetch routines to await
-	result := make([]imgTag, 0)
+	var result []imgTag
 	//await subroutines on panic or
 	defer func() {
 		cancel() // cancel subroutines fetch requests
 		//await canceled subroutines
+		log.WithField("fetchToAwait", await).Debug("awaiting")
 		for ; await > 0; await-- {
 			select {
-			case <-fetchResChan:
-			case <-fetchErrChan:
+			case _ = <-fetchResChan:
+				log.Debug("img awaited")
+			case _ = <-fetchErrChan:
+				log.Debug("error awaited")
 			}
 		}
 		//for debug close fetch channels
@@ -101,16 +108,15 @@ func extractImages(ctx context.Context, r io.Reader) ([]imgTag, error) {
 
 	}()
 	//prepare URL
-	pageURL := getURLParam(ctx)
-	pageURL.Fragment = ""
-	pageURL.RawQuery = ""
-	pageURLStr := pageURL.String()
+	folderURL := getFolderURL(getURLParam(ctx))
 
-	for parseResChan != nil && await > 0 {
+	for parseResChan != nil || await > 0 {
 		select {
-		case img, closed := <-parseResChan:
-			//disable parse channels on parse finish
-			if closed {
+		case img, ok := <-parseResChan:
+			if !ok {
+				//check if parse finish successful
+				log.Debug("parse finished succesfuly")
+				//disable parse channels on parse finish
 				parseResChan = nil
 				parseErrChan = nil
 				continue
@@ -118,19 +124,24 @@ func extractImages(ctx context.Context, r io.Reader) ([]imgTag, error) {
 			//create new fetch routine on img
 			if img.isDataURL() {
 				fetchResChan <- img
+				log.Debug("img with data URL parsed")
 			}
-			imgURL, err := getImgURL(img, pageURLStr)
+			imgURL, err := getImgURL(img, folderURL)
 			if err != nil {
-				return nil, &HandlerError{400, "invalid img tag src URL", err}
+				return nil, err
 			}
+			log.Debug("img parsed. Send for fetching")
 			await++
 			fetchImage(ctx, img, imgURL, fetchResChan, fetchErrChan)
 		case err := <-parseErrChan:
+			log.Debug("parse finished with error")
 			return nil, err
-		case fetchedImg := <-fetchResChan:
+		case img := <-fetchResChan:
+			log.Debug("img fetched")
 			await--
-			result = append(result, fetchedImg)
+			result = append(result, img)
 		case err := <-fetchErrChan:
+			log.Debug("error on img fetch")
 			await--
 			return nil, err
 		}
@@ -140,6 +151,8 @@ func extractImages(ctx context.Context, r io.Reader) ([]imgTag, error) {
 }
 
 // try to download parsedImage
+// on success send only img to imgc
+// on fail send only error to errc
 func fetchImage(ctx context.Context, img imgTag, imgURL string, imgc chan<- imgTag, errc chan<- error) {
 	go func() {
 		resp, err := cxtAwareGet(ctx, imgURL)
@@ -148,6 +161,10 @@ func fetchImage(ctx context.Context, img imgTag, imgURL string, imgc chan<- imgT
 			return
 		}
 		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			errc <- NewHandlerError(400, fmt.Sprintf("expected status code 200 but found %v on image: %v )", resp.StatusCode, imgURL))
+			return
+		}
 		ct := strings.TrimSpace(resp.Header.Get("Content-Type"))
 		if ct == "" {
 			errc <- NewHandlerError(400, "no content-type on image: "+imgURL)
@@ -178,16 +195,24 @@ func fetchImage(ctx context.Context, img imgTag, imgURL string, imgc chan<- imgT
 	}()
 }
 
+//img chan will be closed on parse finish
+//on parse error, parser send err to errc before finish
+//err chan is unbuffered
 func imageParse(ctx context.Context, r io.Reader) (<-chan imgTag, <-chan error) {
-	resChan := make(chan imgTag)
-	errChan := make(chan error)
+	//TODO test
+	imgc := make(chan imgTag)
+	errc := make(chan error)
 	go func() {
+		// on error, error is send before deffer, so receiver got error, and then close signal
+		defer func() {
+			close(imgc)
+		}() // indicate finish
 		z := html.NewTokenizer(r)
 		for {
 			tokenType := z.Next()
 			if tokenType == html.ErrorToken {
 				if z.Err() != io.EOF { //EOF == successful finish
-					errChan <- z.Err()
+					errc <- z.Err() //block until receiver got error
 				}
 				return
 			}
@@ -199,19 +224,33 @@ func imageParse(ctx context.Context, r io.Reader) (<-chan imgTag, <-chan error) 
 				}
 				img, err := parseImgToken(token)
 				if err != nil {
-					errChan <- err
+					errc <- err
 					return
 				}
-				resChan <- img
+				imgc <- img
 
 			}
 		}
 	}()
-	return resChan, errChan
+	return imgc, errc
 }
 
 //TODO test
-func getImgURL(img imgTag, pageURL string) (string, error) {
+func getFolderURL(pageURL *url.URL) string {
+	folderURL := *pageURL //copy URL
+	folderURL.Fragment = ""
+	folderURL.RawQuery = ""
+	if !strings.ContainsRune(folderURL.Path, '/') {
+		folderURL.Path = ""
+	} else {
+		split := strings.Split(folderURL.Path, "/")
+		folderURL.Path = strings.Join(split[:len(split)-1], "/")
+	}
+	return folderURL.String()
+}
+
+//TODO test
+func getImgURL(img imgTag, folderURL string) (string, error) {
 	if img.isDataURL() {
 		panic(errors.New("imgURL on 'data: URL' image"))
 	}
@@ -219,14 +258,14 @@ func getImgURL(img imgTag, pageURL string) (string, error) {
 
 	imgSrcURL, err := url.Parse(src)
 	if err != nil {
-		return "", err
+		return "", &HandlerError{400, "invalid img tag src URL", err}
 	}
 	if imgSrcURL.IsAbs() {
 		return src, nil
 	}
 	if src[0] == '/' {
-		return pageURL + src, nil
+		return folderURL + src, nil
 	}
-	return pageURL + "/" + src, nil
+	return folderURL + "/" + src, nil
 
 }

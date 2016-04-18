@@ -4,18 +4,21 @@ import (
 	"fmt"
 	stdlog "log"
 	"net/http"
+	"os"
 
-	log "github.com/Sirupsen/logrus"
+	logger "github.com/Sirupsen/logrus"
 	. "github.com/Skipor/imgserver"
 	"golang.org/x/net/context"
 )
 
 const (
-	PORT = 8888
+	port = 8888
 )
 
 func init() {
-	log.SetFormatter(&log.TextFormatter{})
+	logger.SetFormatter(&logger.TextFormatter{})
+	logger.SetLevel(logger.DebugLevel)
+	logger.SetOutput(os.Stderr)
 }
 
 type rootHandler struct {
@@ -32,25 +35,24 @@ func (h rootHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 //TODO pass port by flag
 func main() {
-	logger := log.StandardLogger()
-
-	//set logrus as standart log output
-	w := logger.Writer()
+	//set logrus as stdlog output
+	log := logger.StandardLogger()
+	w := log.Writer()
 	defer w.Close()
 	stdlog.SetOutput(w)
 
 	imgHandler := ContextAdaptor{
 		Handler: &ImgHandler{
-			Log:          logger,
-			LogicHandler: NewImgLogicHandler(logger, http.DefaultClient),
-			ErrorHandler: &ErrorLogger{logger},
+			Log:          log,
+			LogicHandler: NewImgLogicHandler(log, http.DefaultClient),
+			ErrorHandler: ErrorLogger{},
 		},
 		Ctx: context.Background(),
 	}
 	http.Handle("/", rootHandler{imgHandler})
-	logger.Fatal(
+	log.Fatal(
 		http.ListenAndServe(
-			fmt.Sprint(":", PORT),
+			fmt.Sprint(":", port),
 			nil,
 		),
 	)
