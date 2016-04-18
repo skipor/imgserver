@@ -3,13 +3,13 @@ package imgserver
 import (
 	"bytes"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
 
+	"github.com/asaskevich/govalidator"
 	"golang.org/x/net/context"
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
@@ -48,10 +48,10 @@ func (img imgTag) token() html.Token {
 	}
 }
 
-
 //run goroutine that parse http and goroutine for image download
 
 type imgExtractor interface {
+	//read html data from r and return all <img> tags converted to data:URL form
 	extractImages(ctx context.Context, r io.Reader) ([]imgTag, error)
 }
 type imgExtractorFunc func(ctx context.Context, r io.Reader) ([]imgTag, error)
@@ -61,7 +61,7 @@ func (f imgExtractorFunc) extractImages(ctx context.Context, r io.Reader) ([]img
 }
 
 type imgExtractorImp struct {
-	parser imageParser
+	parser  imageParser
 	fetcher imageFetcher
 }
 
@@ -95,7 +95,7 @@ func (imp imgExtractorImp) extractImages(ctx context.Context, r io.Reader) ([]im
 		close(fetchErrChan)
 
 	}()
-	folderURL := getFolderURL(getURLParam(ctx))
+	folderURL := getFolderURL(*getURLParam(ctx))
 
 	//while parsing in process and fetch tasks not finished
 	for parseResChan != nil || await > 0 {
@@ -114,7 +114,7 @@ func (imp imgExtractorImp) extractImages(ctx context.Context, r io.Reader) ([]im
 				fetchResChan <- img
 				log.Debug("img with data URL parsed")
 			}
-			imgURL, err := getImgURL(img, folderURL)
+			imgURL, err := getImgURL(img.src(), folderURL)
 			if err != nil {
 				return nil, err
 			}
@@ -209,6 +209,7 @@ type imageParserImp struct {
 	tokenParse imgTokenParser
 }
 
+//TODO test
 func (imp imageParserImp) parseImage(ctx context.Context, r io.Reader) (<-chan imgTag, <-chan error) {
 	imgc := make(chan imgTag)
 	errc := make(chan error)
@@ -245,7 +246,6 @@ func (imp imageParserImp) parseImage(ctx context.Context, r io.Reader) (<-chan i
 	return imgc, errc
 }
 
-//TODO test
 type imgTokenParser interface {
 	parseImgToken(token html.Token) (imgTag, error)
 }
@@ -272,11 +272,11 @@ func parseImgToken(token html.Token) (imgTag, error) {
 	return img, nil
 }
 
-//TODO test
-func getFolderURL(pageURL *url.URL) string {
-	folderURL := *pageURL //copy URL
+func getFolderURL(pageURL url.URL) string {
+	folderURL := &pageURL //alias
 	folderURL.Fragment = ""
 	folderURL.RawQuery = ""
+	folderURL.Path = strings.Trim(folderURL.Path, "/")
 	if !strings.ContainsRune(folderURL.Path, '/') {
 		folderURL.Path = ""
 	} else {
@@ -286,13 +286,7 @@ func getFolderURL(pageURL *url.URL) string {
 	return folderURL.String()
 }
 
-//TODO test
-func getImgURL(img imgTag, folderURL string) (string, error) {
-	if img.isDataURL() {
-		panic(errors.New("imgURL on 'data: URL' image"))
-	}
-	src := img.src()
-
+func getImgURL(src string, folderURL string) (string, error) {
 	imgSrcURL, err := url.Parse(src)
 	if err != nil {
 		return "", &HandlerError{400, "invalid img tag src URL", err}
@@ -300,9 +294,16 @@ func getImgURL(img imgTag, folderURL string) (string, error) {
 	if imgSrcURL.IsAbs() {
 		return src, nil
 	}
-	if src[0] == '/' {
-		return folderURL + src, nil
+	var res string
+	folderURL = strings.TrimRight(folderURL, "/")
+	if src[0] == '/' || folderURL[len(folderURL)-1] == '/' {
+		res = folderURL + src
+	} else {
+		res = folderURL + "/" + src
 	}
-	return folderURL + "/" + src, nil
+	if !govalidator.IsURL(res) {
+		return "", &HandlerError{400, "invalid img tag src URL", err}
+	}
+	return res, nil
 
 }

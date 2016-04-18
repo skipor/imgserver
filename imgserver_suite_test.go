@@ -14,13 +14,13 @@ func TestImgserver(t *testing.T) {
 	RunSpecs(t, "Imgserver Suite")
 }
 
-var logger imgserver.Logger
+var log imgserver.Logger
 
 var _ = BeforeSuite(func() {
 	logger.SetLevel(logger.DebugLevel)
 	logger.SetOutput(GinkgoWriter)
 	logger.SetFormatter(&logger.TextFormatter{})
-	logger = logger.StandardLogger()
+	log = logger.StandardLogger()
 })
 
 var _ = AfterSuite(func() {
