@@ -11,6 +11,10 @@ import (
 
 	"github.com/asaskevich/govalidator"
 
+	"sync"
+	"time"
+
+	"github.com/cenk/backoff"
 	"golang.org/x/net/context"
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
@@ -199,6 +203,94 @@ func fetchImage(ctx context.Context, img imgTag, imgURL string, imgc chan<- imgT
 	}()
 }
 
+type backoffImageFetcher struct {
+	backoffLock *sync.Mutex
+	backoff     backoff.BackOff
+}
+
+func (h backoffImageFetcher) NextBackOff() time.Duration {
+	h.backoffLock.Lock()
+	res := h.backoff.NextBackOff()
+	h.backoffLock.Unlock()
+	return res
+}
+func (h backoffImageFetcher) Reset() {
+	h.backoffLock.Lock()
+	h.backoff.Reset()
+	h.backoffLock.Unlock()
+}
+
+func (bif backoffImageFetcher) fetchImage(ctx context.Context, img imgTag, imgURL string, imgc chan<- imgTag, errc chan<- error) {
+	go func() {
+		log := getLocalLogger(ctx, "backoffFetcher")
+		var (
+			opErr  error
+			opImg * imgTag
+		)
+		operation := func() error {
+			// return err on retry need, or just returns
+			log.Debug("Another try")
+			//TODO remove code duplication
+			resp, err := cxtAwareGet(ctx, imgURL)
+			if err != nil {
+				log.Debug("Get error")
+				opErr = &HandlerError{500, "can't fetch image: " + imgURL, err}
+				return nil
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode >= 500 {
+				//retry on server error
+				log.Debug("Got server error response -> do next try")
+				return &HandlerError{500, "need retry", nil}
+			}
+
+			if resp.StatusCode != http.StatusOK {
+				opErr = NewHandlerError(400, fmt.Sprintf("expected status code 200 but found %v on image: %v )", resp.StatusCode, imgURL))
+				return nil
+			}
+			ct := strings.TrimSpace(resp.Header.Get("Content-Type"))
+			if ct == "" {
+				opErr = NewHandlerError(400, "no content-type on image: "+imgURL)
+				return nil
+			}
+			if !strings.HasPrefix(ct, "image") {
+				opErr = NewHandlerError(400, "not image content-type on image: "+imgURL)
+				return nil
+			}
+			dataURLBuf := bytes.NewBufferString("data:")
+			dataURLBuf.WriteString(ct)
+			dataURLBuf.WriteString(";base64,")
+
+			w := base64.NewEncoder(base64.StdEncoding, dataURLBuf)
+			defer w.Close()
+			_, err = io.Copy(w, resp.Body)
+			if err != nil {
+				opErr = &HandlerError{400, "image fetching error: " + imgURL, err}
+				return nil
+			}
+			opImg = &imgTag{ //copy
+				img.srcIndex,
+				append([]html.Attribute{}, img.attr...),
+			}
+			opImg.setSrc(dataURLBuf.String())
+			return nil
+		}
+		//err := backoff.Retry(operation, bif)
+		err := backoff.Retry(operation, backoff.NewExponentialBackOff())
+		if err != nil {
+			errc <- err
+		} else {
+			if opErr != nil {
+				errc <- err
+			} else {
+				imgc <- img
+			}
+
+		}
+	}()
+}
+
 type imageParser interface {
 	//parse html content in separate goroutine and send imgTags to output img chan
 	//img chan will be closed on parse finish
@@ -229,7 +321,8 @@ func (imp imageParserImp) parseImage(ctx context.Context, r io.Reader) (<-chan i
 		for {
 			tokenType := z.Next()
 			if tokenType == html.ErrorToken {
-				if z.Err() != io.EOF { //EOF == successful finish
+				if z.Err() != io.EOF {
+					//EOF == successful finish
 					errc <- z.Err() //block until receiver got error
 				}
 				return
@@ -303,7 +396,8 @@ func getImgURL(src string, folderURL url.URL) (string, error) {
 	var res string
 	if imgSrcURL.IsAbs() {
 		res = src
-	} else if strings.HasPrefix(src, "//") { //yep, is absolute too
+	} else if strings.HasPrefix(src, "//") {
+		//yep, is absolute too
 		res = "http:" + src
 	} else if src[0] == '/' {
 		folderURL.Path = src

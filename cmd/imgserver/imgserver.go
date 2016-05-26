@@ -15,7 +15,7 @@ import (
 
 const (
 	port    = 8888
-	timeout = time.Millisecond * 500
+	timeout = time.Millisecond * 60000
 )
 
 var log = logger.StandardLogger()

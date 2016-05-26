@@ -14,8 +14,11 @@ import (
 	"golang.org/x/net/context"
 	"golang.org/x/net/html/charset"
 
+	"sync"
+
 	logger "github.com/Sirupsen/logrus"
 	"github.com/asaskevich/govalidator" //IsUrl
+	"github.com/cenk/backoff"
 )
 
 type Handler interface {
@@ -118,7 +121,6 @@ func NewTimeoutResponse() *Response {
 		bytes.NewBufferString(`{ "error":"timeout" }`),
 	}
 }
-
 
 func (h ErrorLogger) HandleError(ctx context.Context, req *http.Request, err error) *Response {
 	log := getLocalLogger(ctx, "ErrorLogger")
@@ -287,7 +289,11 @@ func NewImgLogicHandler(client *http.Client) *ImgLogicHandler {
 		bodyGetterFunc(getBody),
 		imgExtractorImp{
 			imageParserImp{imgTokenParserFunc(parseImgToken)},
-			imageFetcherFunc(fetchImage),
+			//imageFetcherFunc(fetchImage),
+			backoffImageFetcher{
+				&sync.Mutex{},
+				backoff.NewExponentialBackOff(),
+			},
 		},
 	}
 }
