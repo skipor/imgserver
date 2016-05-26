@@ -5,6 +5,7 @@ import (
 	stdlog "log"
 	"net/http"
 	"os"
+	"time"
 
 	logger "github.com/Sirupsen/logrus"
 	"github.com/codegangsta/cli"
@@ -13,7 +14,8 @@ import (
 )
 
 const (
-	port = 8888
+	port    = 8888
+	timeout = time.Millisecond * 500
 )
 
 var log = logger.StandardLogger()
@@ -37,7 +39,7 @@ func (h rootHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func mainAction(c *cli.Context) {
-	imgHandler := NewImgCtxAdaptor(log, http.DefaultClient)
+	imgHandler := NewImgCtxAdaptor(log, http.DefaultClient, timeout)
 	http.Handle("/", rootHandler{imgHandler})
 
 	port := c.Int("port")

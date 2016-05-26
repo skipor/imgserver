@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"golang.org/x/net/context"
 	"golang.org/x/net/html/charset"
@@ -50,10 +51,17 @@ type ImgHandler struct {
 	Log          Logger
 	LogicHandler LogicHandler
 	ErrorHandler ErrorHandler
+	Timeout      time.Duration //no timeout if 0
 	reqCount     uint32
 }
 
 func (h *ImgHandler) ServeHTTPC(ctx context.Context, w http.ResponseWriter, req *http.Request) {
+	cancel := func() {}
+	if h.Timeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, h.Timeout)
+	}
+	defer cancel()
+
 	log := SetEmitter(h.Log, "ImgHandler").WithField("reqnum", atomic.AddUint32(&h.reqCount, 1))
 	ctx = setLogger(ctx, log)
 
@@ -101,9 +109,25 @@ func NewInternalErrorResponse() *Response {
 	}
 }
 
+func NewTimeoutResponse() *Response {
+	return &Response{
+		http.StatusGatewayTimeout,
+		http.Header(map[string][]string{
+			"Content-Type": []string{"application/json"},
+		}),
+		bytes.NewBufferString(`{ "error":"timeout" }`),
+	}
+}
+
+
 func (h ErrorLogger) HandleError(ctx context.Context, req *http.Request, err error) *Response {
 	log := getLocalLogger(ctx, "ErrorLogger")
 	//TODO handle http.context errors
+	if deadline, ok := ctx.Deadline(); ok && time.Now().After(deadline) {
+		log.Info("Request timeout: ", err)
+		return NewTimeoutResponse()
+	}
+
 	if hErr, ok := err.(*HandlerError); ok {
 		if hErr.statusCode >= 400 && hErr.statusCode < 500 {
 			log.WithField("StatusCode", hErr.statusCode).Info("Body handle client error: ", hErr)
@@ -268,12 +292,13 @@ func NewImgLogicHandler(client *http.Client) *ImgLogicHandler {
 	}
 }
 
-func NewImgCtxAdaptor(log Logger, client *http.Client) ContextAdaptor {
-	return  ContextAdaptor{
+func NewImgCtxAdaptor(log Logger, client *http.Client, timeout time.Duration) ContextAdaptor {
+	return ContextAdaptor{
 		Handler: &ImgHandler{
 			Log:          log,
 			LogicHandler: NewImgLogicHandler(client),
 			ErrorHandler: ErrorLogger{},
+			Timeout:      timeout,
 		},
 		Ctx: context.Background(),
 	}
