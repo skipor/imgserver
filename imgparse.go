@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/asaskevich/govalidator"
+
 	"golang.org/x/net/context"
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
@@ -97,10 +98,12 @@ func (imp imgExtractorImp) extractImages(ctx context.Context, r io.Reader) ([]im
 	}()
 	folderURL := *getFolderURL(*getURLParam(ctx))
 
+	log.Debug("Async await")
 	//while parsing in process and fetch tasks not finished
 	for parseResChan != nil || await > 0 {
 		select {
 		case img, ok := <-parseResChan:
+			log.Debug("Async got image")
 			if !ok {
 				//check if parse finish successful
 				log.Debug("parse finished succesfuly")
@@ -111,8 +114,9 @@ func (imp imgExtractorImp) extractImages(ctx context.Context, r io.Reader) ([]im
 			}
 			//create new fetch routine on img
 			if img.isDataURL() {
-				fetchResChan <- img
 				log.Debug("img with data URL parsed")
+				result = append(result, img)
+				continue
 			}
 			imgURL, err := getImgURL(img.src(), folderURL)
 			if err != nil {
@@ -120,8 +124,8 @@ func (imp imgExtractorImp) extractImages(ctx context.Context, r io.Reader) ([]im
 			}
 			log.WithField("token", img.token().String()).
 				Debug("img parsed. Send for fetching")
-
 			await++
+			log.Debug("Async fetching image")
 			imp.fetcher.fetchImage(ctx, img, imgURL, fetchResChan, fetchErrChan)
 		case err := <-parseErrChan:
 			log.Debug("parse finished with error")
@@ -137,6 +141,7 @@ func (imp imgExtractorImp) extractImages(ctx context.Context, r io.Reader) ([]im
 		}
 
 	}
+	log.Debug("Async await Done")
 	return result, nil
 }
 
@@ -293,7 +298,7 @@ func getFolderURL(pageURL url.URL) *url.URL {
 func getImgURL(src string, folderURL url.URL) (string, error) {
 	imgSrcURL, err := url.Parse(src)
 	if err != nil {
-		return "", &HandlerError{400, "invalid img tag src URL", err}
+		return "", &HandlerError{400, "invalid img tag src URL: url parse", err}
 	}
 	var res string
 	if imgSrcURL.IsAbs() {
@@ -313,7 +318,7 @@ func getImgURL(src string, folderURL url.URL) (string, error) {
 		}
 	}
 	if !govalidator.IsURL(res) {
-		return "", &HandlerError{400, "invalid img tag src URL", err}
+		return "", &HandlerError{400, "invalid img tag src URL: is not valid URL", err}
 	}
 	return res, nil
 
